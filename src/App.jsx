@@ -27,16 +27,14 @@ import {
 import {
   addDoc,
   collection,
-  collectionGroup,
   doc,
-  getCountFromServer,
   getDoc,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
-  where,
+  updateDoc,
 } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from './firebase';
 
@@ -70,11 +68,56 @@ const formatJoinDate = (createdAt) => {
   });
 };
 
-const formatMetric = (value) => (
-  typeof value === 'number' ? value.toLocaleString() : 'Coming Soon'
-);
+const getPredictionDate = (createdAt) => {
+  if (!createdAt) {
+    return null;
+  }
+
+  const date = typeof createdAt.toDate === 'function' ? createdAt.toDate() : new Date(createdAt);
+
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatAnalyticsDate = (date) => {
+  if (!date) {
+    return 'No history';
+  }
+
+  return date.toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+};
+
+const formatNotificationDate = (createdAt) => {
+  const date = getPredictionDate(createdAt);
+
+  if (!date) {
+    return 'Just now';
+  }
+
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const getMostUsedValue = (counts) => {
+  const entries = Object.entries(counts);
+
+  if (entries.length === 0) {
+    return 'No history';
+  }
+
+  return entries.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0];
+};
 
 const getPredictionCollectionPath = (uid) => `users/${uid}/predictions`;
+const getNotificationCollectionPath = (uid) => `users/${uid}/notifications`;
 
 const getFirestoreLogError = (error) => (
   `code=${error?.code || 'unknown'} message=${error?.message || 'No message'}`
@@ -100,11 +143,7 @@ export default function LottoVisionAI() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
   const [firebaseConnected, setFirebaseConnected] = useState(false);
-  const [dashboardMetrics, setDashboardMetrics] = useState({
-    totalPredictions: null,
-    totalUsers: null,
-    premiumUsers: null,
-  });
+  const [notifications, setNotifications] = useState([]);
 
   const loadUserProfile = useCallback(async (user) => {
     if (!db || !user) {
@@ -139,52 +178,29 @@ export default function LottoVisionAI() {
     setIsPremium(Boolean(profileData.isPremium));
   }, []);
 
-  const liveDraws = [
-    {
-      country: 'South Africa',
-      game: 'PowerBall',
-      jackpot: 'Coming Soon',
-      time: 'Coming Soon',
-    },
-    {
-      country: 'USA',
-      game: 'Mega Millions',
-      jackpot: 'Coming Soon',
-      time: 'Coming Soon',
-    },
-    {
-      country: 'UK',
-      game: 'UK Lotto',
-      jackpot: 'Coming Soon',
-      time: 'Coming Soon',
-    },
-  ];
+  const createUserNotification = useCallback(async (uid, title, message) => {
+    if (!db || !uid) {
+      return;
+    }
 
-  const stats = useMemo(
-    () => [
-      {
-        label: 'Total Predictions Generated',
-        value: formatMetric(dashboardMetrics.totalPredictions),
-        icon: <Brain className="w-7 h-7" />,
-      },
-      {
-        label: 'Global Users',
-        value: formatMetric(dashboardMetrics.totalUsers),
-        icon: <Globe className="w-7 h-7" />,
-      },
-      {
-        label: 'Premium Members',
-        value: formatMetric(dashboardMetrics.premiumUsers),
-        icon: <Crown className="w-7 h-7" />,
-      },
-      {
-        label: 'Accuracy Tracking',
-        value: 'Coming Soon',
-        icon: <TrendingUp className="w-7 h-7" />,
-      },
-    ],
-    [dashboardMetrics]
-  );
+    const notificationCollectionPath = getNotificationCollectionPath(uid);
+
+    try {
+      await addDoc(collection(db, notificationCollectionPath), {
+        title,
+        message,
+        createdAt: serverTimestamp(),
+        read: false,
+      });
+      console.log(
+        `[LottoVision AI] Notification write success: path=${notificationCollectionPath} title=${title}`
+      );
+    } catch (error) {
+      console.error(
+        `[LottoVision AI] Notification write failure: path=${notificationCollectionPath} ${getFirestoreLogError(error)}`
+      );
+    }
+  }, []);
 
   const predictionHistory = useMemo(
     () => [
@@ -196,34 +212,97 @@ export default function LottoVisionAI() {
     [pendingPredictions, savedPredictions]
   );
 
-  const mostUsedPredictionMode = useMemo(() => {
-    if (predictionHistory.length === 0) {
-      return 'Coming Soon';
-    }
+  const predictionAnalytics = useMemo(() => {
+    const modeCounts = {};
+    const countryCounts = {};
+    const numberCounts = {};
+    const predictionDates = [];
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
 
-    const modeCounts = predictionHistory.reduce((counts, item) => ({
-      ...counts,
-      [item.mode]: (counts[item.mode] || 0) + 1,
-    }), {});
+    predictionHistory.forEach((item) => {
+      if (item.mode) {
+        modeCounts[item.mode] = (modeCounts[item.mode] || 0) + 1;
+      }
 
-    return Object.entries(modeCounts).sort((a, b) => b[1] - a[1])[0][0];
+      if (item.country) {
+        countryCounts[item.country] = (countryCounts[item.country] || 0) + 1;
+      }
+
+      const predictionDate = getPredictionDate(item.createdAt);
+
+      if (predictionDate) {
+        predictionDates.push(predictionDate);
+      }
+
+      if (Array.isArray(item.numbers)) {
+        item.numbers.forEach((number) => {
+          numberCounts[number] = (numberCounts[number] || 0) + 1;
+        });
+      }
+    });
+
+    const sortedDates = [...predictionDates].sort((a, b) => a.getTime() - b.getTime());
+    const predictionsThisMonth = predictionDates.filter((date) => (
+      date >= monthStart && date < nextMonthStart
+    )).length;
+    const topNumbers = Object.entries(numberCounts)
+      .sort((a, b) => b[1] - a[1] || Number(a[0]) - Number(b[0]))
+      .slice(0, 10)
+      .map(([number, count]) => ({ number, count }));
+
+    return {
+      totalPredictions: predictionHistory.length,
+      firstPredictionDate: sortedDates[0] || null,
+      lastPredictionDate: sortedDates[sortedDates.length - 1] || null,
+      predictionsThisMonth,
+      mostUsedPredictionMode: getMostUsedValue(modeCounts),
+      mostUsedCountry: getMostUsedValue(countryCounts),
+      topNumbers,
+    };
   }, [predictionHistory]);
 
-  const countryUsage = useMemo(() => {
-    if (predictionHistory.length === 0) {
-      return 'Coming Soon';
-    }
+  const analyticsCards = useMemo(
+    () => [
+      {
+        label: 'Total Predictions Generated',
+        value: predictionAnalytics.totalPredictions.toLocaleString(),
+        icon: <Brain className="w-7 h-7" />,
+      },
+      {
+        label: 'First Prediction Date',
+        value: formatAnalyticsDate(predictionAnalytics.firstPredictionDate),
+        icon: <Database className="w-7 h-7" />,
+      },
+      {
+        label: 'Last Prediction Date',
+        value: formatAnalyticsDate(predictionAnalytics.lastPredictionDate),
+        icon: <TrendingUp className="w-7 h-7" />,
+      },
+      {
+        label: 'Predictions This Month',
+        value: predictionAnalytics.predictionsThisMonth.toLocaleString(),
+        icon: <BarChart3 className="w-7 h-7" />,
+      },
+      {
+        label: 'Most-Used Prediction Mode',
+        value: predictionAnalytics.mostUsedPredictionMode,
+        icon: <Sparkles className="w-7 h-7" />,
+      },
+      {
+        label: 'Most-Used Country',
+        value: predictionAnalytics.mostUsedCountry,
+        icon: <Globe className="w-7 h-7" />,
+      },
+    ],
+    [predictionAnalytics]
+  );
 
-    const countryCounts = predictionHistory.reduce((counts, item) => ({
-      ...counts,
-      [item.country]: (counts[item.country] || 0) + 1,
-    }), {});
-
-    return Object.entries(countryCounts)
-      .sort((a, b) => b[1] - a[1])
-      .map(([country, count]) => `${country}: ${count}`)
-      .join(', ');
-  }, [predictionHistory]);
+  const unreadNotificationCount = useMemo(
+    () => notifications.filter((notification) => !notification.read).length,
+    [notifications]
+  );
 
   useEffect(() => {
     if (!auth || !firebaseConfigured) {
@@ -245,6 +324,7 @@ export default function LottoVisionAI() {
           if (!user) {
             setSavedPredictions([]);
             setPendingPredictions([]);
+            setNotifications([]);
             setPrediction([]);
           }
           // Future Stripe subscription status updates will write to this Firestore profile.
@@ -307,47 +387,37 @@ export default function LottoVisionAI() {
 
   useEffect(() => {
     if (!db || !currentUser) {
-      return;
+      return undefined;
     }
 
-    let active = true;
+    const notificationCollectionPath = getNotificationCollectionPath(currentUser.uid);
+    console.log('[LottoVision AI] Notifications subscribe path:', notificationCollectionPath);
 
-    const loadDashboardMetrics = async () => {
-      try {
-        const [predictionCount, userCount, premiumCount] = await Promise.all([
-          getCountFromServer(collectionGroup(db, 'predictions')),
-          getCountFromServer(collection(db, 'users')),
-          getCountFromServer(query(collection(db, 'users'), where('isPremium', '==', true))),
-        ]);
+    const notificationsRef = collection(db, notificationCollectionPath);
+    const notificationsQuery = query(notificationsRef, orderBy('createdAt', 'desc'));
 
-        if (!active) {
-          return;
-        }
+    return onSnapshot(
+      notificationsQuery,
+      (snapshot) => {
+        const nextNotifications = snapshot.docs.map((notificationDoc) => ({
+          id: notificationDoc.id,
+          ...notificationDoc.data(),
+        }));
 
-        setDashboardMetrics({
-          totalPredictions: predictionCount.data().count,
-          totalUsers: userCount.data().count,
-          premiumUsers: premiumCount.data().count,
-        });
-      } catch (error) {
-        if (!active) {
-          return;
-        }
+        console.log(
+          `[LottoVision AI] Notifications read success: path=${notificationCollectionPath} count=${nextNotifications.length}`
+        );
 
-        setDashboardMetrics({
-          totalPredictions: savedPredictions.length,
-          totalUsers: null,
-          premiumUsers: null,
-        });
+        setNotifications(nextNotifications);
+      },
+      (error) => {
+        console.error(
+          `[LottoVision AI] Notifications read failure: path=${notificationCollectionPath} ${getFirestoreLogError(error)}`
+        );
+        setAuthError(getAuthMessage(error));
       }
-    };
-
-    loadDashboardMetrics();
-
-    return () => {
-      active = false;
-    };
-  }, [currentUser, savedPredictions.length]);
+    );
+  }, [currentUser]);
 
   const loginWithFirebase = async (email, password) => {
     await signInWithEmailAndPassword(auth, email, password);
@@ -369,6 +439,11 @@ export default function LottoVisionAI() {
         doc(db, 'users', credential.user.uid),
         getUserProfileData(credential.user, trimmedDisplayName),
         { merge: true }
+      );
+      await createUserNotification(
+        credential.user.uid,
+        'New account created',
+        'Welcome to LottoVision AI. Your account is ready.'
       );
     }
   };
@@ -499,6 +574,11 @@ export default function LottoVisionAI() {
         },
         ...prev.filter((item) => item.id !== predictionDocRef.id),
       ]);
+      await createUserNotification(
+        currentUser.uid,
+        'Prediction generated',
+        `${predictionMode} prediction created for ${selectedCountry}: ${nextPrediction.numbers.join(', ')}.`
+      );
     } catch (error) {
       console.error(
         `[LottoVision AI] Prediction write failure: path=${predictionCollectionPath} ${getFirestoreLogError(error)}`
@@ -510,6 +590,48 @@ export default function LottoVisionAI() {
     }
   };
 
+  const markNotificationAsRead = async (notification) => {
+    if (!db || !currentUser || notification.read) {
+      return;
+    }
+
+    const notificationCollectionPath = getNotificationCollectionPath(currentUser.uid);
+
+    setNotifications((prev) => (
+      prev.map((item) => (
+        item.id === notification.id ? { ...item, read: true } : item
+      ))
+    ));
+
+    try {
+      await updateDoc(doc(db, notificationCollectionPath, notification.id), {
+        read: true,
+      });
+    } catch (error) {
+      console.error(
+        `[LottoVision AI] Notification update failure: path=${notificationCollectionPath}/${notification.id} ${getFirestoreLogError(error)}`
+      );
+      setNotifications((prev) => (
+        prev.map((item) => (
+          item.id === notification.id ? { ...item, read: false } : item
+        ))
+      ));
+      setAuthError(getAuthMessage(error));
+    }
+  };
+
+  const handleTabClick = (tab) => {
+    setActiveTab(tab);
+
+    if (tab === 'Premium' && currentUser) {
+      createUserNotification(
+        currentUser.uid,
+        'Premium feature viewed',
+        'You opened the LottoVision AI Premium feature area.'
+      );
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#050816] text-white p-6 font-sans">
       <div className="max-w-7xl mx-auto">
@@ -518,7 +640,7 @@ export default function LottoVisionAI() {
             {['Dashboard', 'Predictions', 'Analytics', 'Premium', 'Notifications'].map((tab) => (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab)}
+                onClick={() => handleTabClick(tab)}
                 className={`px-6 py-3 rounded-2xl font-bold transition ${
                   activeTab === tab
                     ? 'bg-gradient-to-r from-purple-600 to-cyan-500'
@@ -549,13 +671,17 @@ export default function LottoVisionAI() {
           <div className="flex items-center gap-4 flex-wrap">
             {currentUser && (
               <button
-                onClick={() => setActiveTab('Notifications')}
+                onClick={() => handleTabClick('Notifications')}
                 className="bg-[#161F38] px-5 py-3 rounded-2xl flex items-center gap-3"
               >
                 <Bell className="text-cyan-400" />
                 <div>
                   <p className="text-xs text-gray-400">Notifications</p>
-                  <p className="font-semibold">Coming Soon</p>
+                  <p className="font-semibold">
+                    {unreadNotificationCount === 0
+                      ? 'All caught up'
+                      : `${unreadNotificationCount} unread`}
+                  </p>
                 </div>
               </button>
             )}
@@ -727,41 +853,56 @@ export default function LottoVisionAI() {
         {currentUser && (
           <>
         {activeTab === 'Analytics' && (
-        <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-5 mb-8">
-          {stats.map((item) => (
+        <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5 mb-8">
+          {analyticsCards.map((item) => (
             <div
               key={item.label}
-              className="bg-[#161F38] rounded-[28px] p-6"
+              className="bg-[#161F38] rounded-[28px] p-6 border border-white/5"
             >
               <div className="text-cyan-400 mb-4">{item.icon}</div>
               <p className="text-gray-400 text-sm">{item.label}</p>
-              <h3 className="text-3xl font-black mt-2">{item.value}</h3>
+              <h3 className="text-3xl font-black mt-2 break-words">{item.value}</h3>
             </div>
           ))}
         </div>
         )}
 
         {activeTab === 'Analytics' && (
-        <div className="grid md:grid-cols-2 gap-6 mb-8">
-          {[
-            {
-              label: 'Most Used Prediction Mode',
-              value: mostUsedPredictionMode,
-            },
-            {
-              label: 'Country Usage',
-              value: countryUsage,
-            },
-          ].map((item) => (
-            <div
-              key={item.label}
-              className="bg-[#161F38] rounded-[28px] p-6"
-            >
-              <div className="text-cyan-400 mb-4"><BarChart3 className="w-7 h-7" /></div>
-              <p className="text-gray-400 text-sm">{item.label}</p>
-              <h3 className="text-3xl font-black mt-2">{item.value}</h3>
+        <div className="bg-[#161F38] rounded-[32px] p-7 mb-8 border border-white/5">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-3">
+              <Trophy className="text-yellow-300" />
+              <h3 className="text-3xl font-black">Top Generated Numbers</h3>
             </div>
-          ))}
+
+            <p className="text-gray-400 text-sm">
+              Based on saved prediction history
+            </p>
+          </div>
+
+          {predictionAnalytics.topNumbers.length === 0 ? (
+            <div className="bg-[#0B1020] rounded-2xl p-8 text-center">
+              <p className="text-xl font-bold">No number analytics yet.</p>
+            </div>
+          ) : (
+            <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
+              {predictionAnalytics.topNumbers.map((item, index) => (
+                <div
+                  key={item.number}
+                  className="bg-black/20 rounded-2xl p-5 border border-white/10"
+                >
+                  <div className="flex items-center justify-between mb-4">
+                    <p className="text-cyan-300 font-bold text-sm">#{index + 1}</p>
+                    <p className="text-gray-400 text-sm">{item.count}x</p>
+                  </div>
+
+                  <div className="w-16 h-16 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 flex items-center justify-center text-2xl font-black">
+                    {item.number}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         )}
 
@@ -833,47 +974,6 @@ export default function LottoVisionAI() {
                 <h4 className="mt-3 font-semibold leading-snug">{item.value}</h4>
               </div>
             ))}
-          </div>
-        </div>
-        )}
-
-        {activeTab === 'Analytics' && (
-        <div className="grid lg:grid-cols-3 gap-6 mb-8">
-          <div className="lg:col-span-2 bg-gradient-to-r from-purple-700 to-cyan-500 rounded-[32px] p-8">
-            <div className="flex items-center gap-2 mb-4">
-              <Trophy className="text-yellow-300" />
-              <p className="text-white/80 text-lg">Tonight Jackpot</p>
-            </div>
-
-            <h2 className="text-6xl font-black">Coming Soon</h2>
-
-            <p className="mt-5 text-xl max-w-2xl text-white/90">
-              Live jackpot analysis will appear when real draw data is connected.
-            </p>
-
-            <div className="flex flex-wrap gap-4 mt-8">
-              <button
-                onClick={generatePrediction}
-                className="bg-black/30 px-7 py-4 rounded-2xl font-bold text-lg"
-              >
-                Generate AI Predictions
-              </button>
-            </div>
-          </div>
-
-          <div className="bg-[#161F38] rounded-[32px] p-7">
-            <div className="flex items-center gap-3 mb-6">
-              <Brain className="text-green-400" />
-              <h3 className="text-2xl font-bold">AI Confidence</h3>
-            </div>
-
-            <div className="w-full bg-black/30 rounded-full h-6 overflow-hidden">
-              <div className="bg-gradient-to-r from-green-400 to-cyan-400 h-6 w-0"></div>
-            </div>
-
-            <div className="mt-5 text-5xl font-black text-green-400">
-              Coming Soon
-            </div>
           </div>
         </div>
         )}
@@ -989,24 +1089,6 @@ export default function LottoVisionAI() {
               )}
             </div>
           </div>
-        </div>
-        )}
-
-        {activeTab === 'Analytics' && (
-        <div className="grid md:grid-cols-3 gap-6 mb-8">
-          {liveDraws.map((draw) => (
-            <div
-              key={draw.game}
-              className="bg-[#161F38] rounded-[30px] p-6"
-            >
-              <p className="text-gray-400 text-sm">{draw.country}</p>
-              <h4 className="text-2xl font-bold mt-1">{draw.game}</h4>
-              <p className="text-yellow-300 text-3xl font-black mt-4">
-                {draw.jackpot}
-              </p>
-              <p className="mt-3 text-gray-300">Draw Time: {draw.time}</p>
-            </div>
-          ))}
         </div>
         )}
 
@@ -1164,13 +1246,72 @@ export default function LottoVisionAI() {
 
         {activeTab === 'Notifications' && (
         <div className="bg-[#161F38] rounded-[32px] p-7 mb-8">
-          <div className="flex items-center gap-3 mb-6">
-            <Bell className="text-cyan-400" />
-            <h3 className="text-3xl font-black">Notification Center</h3>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+            <div className="flex items-center gap-3">
+              <Bell className="text-cyan-400" />
+              <h3 className="text-3xl font-black">Notification Center</h3>
+            </div>
+
+            <div className="bg-black/20 rounded-2xl px-4 py-3 border border-white/10">
+              <p className="text-gray-400 text-xs">Unread</p>
+              <p className="font-black text-cyan-300">{unreadNotificationCount}</p>
+            </div>
           </div>
 
-          <div className="bg-[#0B1020] rounded-2xl p-8 text-center">
-            <p className="text-xl font-bold">No notifications yet.</p>
+          <div className="space-y-4">
+            {notifications.length === 0 ? (
+              <div className="bg-[#0B1020] rounded-2xl p-8 text-center">
+                <p className="text-xl font-bold">No notifications yet.</p>
+              </div>
+            ) : (
+              notifications.map((notification) => (
+                <div
+                  key={notification.id}
+                  className={`bg-[#0B1020] rounded-2xl p-5 border ${
+                    notification.read ? 'border-white/5 opacity-75' : 'border-cyan-400/40'
+                  }`}
+                >
+                  <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-3 mb-2">
+                        <span
+                          className={`w-3 h-3 rounded-full ${
+                            notification.read ? 'bg-gray-500' : 'bg-cyan-400'
+                          }`}
+                        />
+                        <p className="text-gray-400 text-sm">
+                          {formatNotificationDate(notification.createdAt)}
+                        </p>
+                      </div>
+
+                      <h4 className="text-2xl font-black">{notification.title}</h4>
+                      <p className="text-gray-300 mt-2">{notification.message}</p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`px-3 py-2 rounded-xl text-sm font-bold ${
+                          notification.read
+                            ? 'bg-white/5 text-gray-300'
+                            : 'bg-cyan-500/20 text-cyan-200'
+                        }`}
+                      >
+                        {notification.read ? 'Read' : 'Unread'}
+                      </span>
+
+                      {!notification.read && (
+                        <button
+                          onClick={() => markNotificationAsRead(notification)}
+                          className="bg-gradient-to-r from-purple-600 to-cyan-500 px-4 py-2 rounded-xl font-bold"
+                        >
+                          Mark Read
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
         )}
