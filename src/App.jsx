@@ -14,6 +14,7 @@ import {
   User,
   LogIn,
   Database,
+  RefreshCw,
 } from 'lucide-react';
 import {
   browserLocalPersistence,
@@ -37,6 +38,7 @@ import {
   updateDoc,
 } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from './firebase';
+import { getLotteryResults } from './services/lotteryResults';
 
 const getAuthMessage = (error) => {
   const code = error?.code?.replace('auth/', '').replaceAll('-', ' ');
@@ -144,6 +146,8 @@ export default function LottoVisionAI() {
   const [authError, setAuthError] = useState('');
   const [firebaseConnected, setFirebaseConnected] = useState(false);
   const [notifications, setNotifications] = useState([]);
+  const [lotteryResults, setLotteryResults] = useState([]);
+  const [lotteryResultsStatus, setLotteryResultsStatus] = useState('Loading results...');
 
   const loadUserProfile = useCallback(async (user) => {
     if (!db || !user) {
@@ -303,6 +307,23 @@ export default function LottoVisionAI() {
     () => notifications.filter((notification) => !notification.read).length,
     [notifications]
   );
+
+  const loadLotteryResults = useCallback(async (forceRefresh = false) => {
+    setLotteryResultsStatus(forceRefresh ? 'Refreshing results...' : 'Loading results...');
+
+    try {
+      const results = await getLotteryResults({ forceRefresh });
+      setLotteryResults(results);
+      setLotteryResultsStatus('Results updated');
+    } catch (error) {
+      setLotteryResultsStatus('Results unavailable');
+      console.error(`[LottoVision AI] Lottery results load failure: ${error?.message || error}`);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadLotteryResults();
+  }, [loadLotteryResults]);
 
   useEffect(() => {
     if (!auth || !firebaseConfigured) {
@@ -847,6 +868,103 @@ export default function LottoVisionAI() {
               ))}
             </div>
           </div>
+        </div>
+        )}
+
+        {currentUser && ['Dashboard', 'Analytics'].includes(activeTab) && (
+        <div className="bg-[#161F38] rounded-[32px] p-7 mb-8 border border-white/5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-5 mb-6">
+            <div className="flex items-center gap-3">
+              <Trophy className="text-yellow-300" />
+              <div>
+                <h3 className="text-3xl font-black">Live Lottery Results</h3>
+                <p className="text-gray-400 mt-1">
+                  Current jackpot, last draw numbers and next draw date.
+                </p>
+              </div>
+            </div>
+
+            <button
+              onClick={() => loadLotteryResults(true)}
+              className="bg-black/20 hover:bg-black/30 border border-white/10 px-5 py-3 rounded-2xl font-bold flex items-center gap-3"
+            >
+              <RefreshCw className="w-5 h-5 text-cyan-400" />
+              {lotteryResultsStatus}
+            </button>
+          </div>
+
+          {lotteryResults.length === 0 ? (
+            <div className="bg-[#0B1020] rounded-2xl p-8 text-center">
+              <p className="text-xl font-bold">{lotteryResultsStatus}</p>
+            </div>
+          ) : (
+          <div className="grid lg:grid-cols-3 gap-5">
+            {lotteryResults.map((draw) => (
+              <div
+                key={draw.id}
+                className="bg-[#0B1020] rounded-3xl p-6 border border-white/10"
+              >
+                <div className="flex items-start justify-between gap-4 mb-5">
+                  <div>
+                    <p className="text-gray-400 text-sm">{draw.country}</p>
+                    <h4 className="text-2xl font-black mt-1">{draw.game}</h4>
+                  </div>
+
+                  <span className="bg-cyan-500/15 text-cyan-200 px-3 py-2 rounded-xl text-xs font-bold">
+                    {draw.status}
+                  </span>
+                </div>
+
+                <div className="bg-black/20 rounded-2xl p-4 border border-white/5 mb-5">
+                  <p className="text-gray-400 text-sm">Current Jackpot</p>
+                  <p className="text-3xl font-black text-yellow-300 mt-2">
+                    {draw.jackpot}
+                  </p>
+                </div>
+
+                <div className="mb-5">
+                  <p className="text-gray-400 text-sm mb-3">
+                    Last Draw: {draw.lastDrawDate}
+                  </p>
+                  <div className="flex flex-wrap gap-3">
+                    {draw.lastDrawNumbers.map((number) => (
+                      <div
+                        key={`${draw.id}-${number}`}
+                        className="w-12 h-12 rounded-full bg-gradient-to-r from-purple-600 to-cyan-500 flex items-center justify-center font-black"
+                      >
+                        {number}
+                      </div>
+                    ))}
+                    {draw.bonusNumber && (
+                      <div className="w-12 h-12 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 flex items-center justify-center font-black">
+                        {draw.bonusNumber}
+                      </div>
+                    )}
+                  </div>
+                  {draw.bonusLabel && (
+                    <p className="text-gray-400 text-xs mt-2">
+                      Orange ball: {draw.bonusLabel}
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-2 text-sm">
+                  <p className="text-gray-300">
+                    <span className="text-gray-500">Next draw:</span> {draw.nextDrawDate}
+                  </p>
+                  <a
+                    href={draw.sourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-cyan-300 font-semibold"
+                  >
+                    Source: {draw.sourceName}
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+          )}
         </div>
         )}
 
