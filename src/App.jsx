@@ -39,6 +39,7 @@ import {
 } from 'firebase/firestore';
 import { auth, db, firebaseConfigured } from './firebase';
 import { getLotteryResults } from './services/lotteryResults';
+import { generateAnalyzedPrediction } from './services/predictionEngine';
 
 const getAuthMessage = (error) => {
   const code = error?.code?.replace('auth/', '').replaceAll('-', ' ');
@@ -127,6 +128,7 @@ const getFirestoreLogError = (error) => (
 
 export default function LottoVisionAI() {
   const [prediction, setPrediction] = useState([]);
+  const [predictionConfidence, setPredictionConfidence] = useState('');
 
   const [selectedCountry, setSelectedCountry] = useState('South Africa');
   const [savedPredictions, setSavedPredictions] = useState([]);
@@ -347,6 +349,7 @@ export default function LottoVisionAI() {
             setPendingPredictions([]);
             setNotifications([]);
             setPrediction([]);
+            setPredictionConfidence('');
           }
           // Future Stripe subscription status updates will write to this Firestore profile.
           try {
@@ -395,6 +398,7 @@ export default function LottoVisionAI() {
         setSavedPredictions(predictions);
         if (predictions.length > 0) {
           setPrediction(predictions[0].numbers);
+          setPredictionConfidence(predictions[0].confidence || '');
         }
       },
       (error) => {
@@ -526,27 +530,22 @@ export default function LottoVisionAI() {
   };
 
   const generatePrediction = async () => {
-    const numbers = [];
-
-    while (numbers.length < 6) {
-      const num = Math.floor(Math.random() * 49) + 1;
-      const formatted = num.toString().padStart(2, '0');
-
-      if (!numbers.includes(formatted)) {
-        numbers.push(formatted);
-      }
-    }
-
-    const generated = numbers.sort();
+    const generatedPrediction = generateAnalyzedPrediction({
+      country: selectedCountry,
+      mode: predictionMode,
+      lotteryResults,
+      predictionHistory,
+    });
     const optimisticPredictionId = Date.now();
     const nextPrediction = {
       mode: predictionMode,
       country: selectedCountry,
-      numbers: generated,
-      confidence: `${70 + Math.floor(Math.random() * 20)}%`,
+      numbers: generatedPrediction.numbers,
+      confidence: generatedPrediction.confidence,
     };
 
-    setPrediction(generated);
+    setPrediction(generatedPrediction.numbers);
+    setPredictionConfidence(generatedPrediction.confidence);
 
     if (!db || !currentUser) {
       console.error(
@@ -1138,6 +1137,11 @@ export default function LottoVisionAI() {
               <div className="bg-black/20 rounded-3xl p-5">
                 <p className="text-gray-400 text-sm">Prediction Mode</p>
                 <h3 className="text-3xl font-black mt-4">{predictionMode}</h3>
+                {predictionConfidence && (
+                  <p className="text-green-300 font-bold mt-3">
+                    Confidence: {predictionConfidence}
+                  </p>
+                )}
               </div>
             </div>
 
